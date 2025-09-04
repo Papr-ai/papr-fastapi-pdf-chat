@@ -28,6 +28,21 @@
                         </div>
                     </div>
                     
+                    <!-- Enhanced Upload Option -->
+                    <div class="mt-4">
+                        <label class="flex items-center space-x-2 cursor-pointer">
+                            <input type="checkbox" id="enhanced-upload" class="rounded border-gray-300 text-blue-600 focus:ring-blue-500" checked>
+                            <span class="text-sm font-medium text-gray-700">Enhanced Upload</span>
+                            <div class="group relative">
+                                <div class="text-gray-400 hover:text-gray-600">ℹ️</div>
+                                <div class="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 px-3 py-2 bg-gray-800 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 transition-opacity duration-200 whitespace-nowrap z-10">
+                                    Uses AI to generate rich metadata for better search
+                                </div>
+                            </div>
+                        </label>
+                        <p class="text-xs text-gray-500 mt-1 ml-6">AI analyzes each chunk for titles, keywords, topics, and hierarchical structure</p>
+                    </div>
+                    
                     <!-- Upload Status -->
                     <div id="upload-progress" class="hidden mt-4">
                         <div class="bg-blue-50 border border-blue-200 rounded-lg p-3">
@@ -139,6 +154,7 @@
             initializeElements() {
                 this.uploadArea = document.getElementById('upload-area');
                 this.fileInput = document.getElementById('file-input');
+                this.enhancedUpload = document.getElementById('enhanced-upload');
                 this.uploadProgress = document.getElementById('upload-progress');
                 this.uploadSuccess = document.getElementById('upload-success');
                 this.uploadError = document.getElementById('upload-error');
@@ -233,8 +249,16 @@
                     // Start listening to progress updates first
                     this.streamProgress(uploadId, file.name);
                     
+                    // Determine upload endpoint based on enhanced option
+                    const isEnhanced = this.enhancedUpload && this.enhancedUpload.checked;
+                    const endpoint = isEnhanced ? 
+                        `/upload/enhanced-with-progress/${uploadId}` : 
+                        `/upload/with-progress/${uploadId}`;
+                    
+                    console.log(`Using ${isEnhanced ? 'enhanced' : 'standard'} upload for ${file.name}`);
+                    
                     // Then start the upload
-                    const response = await fetch(`/upload/with-progress/${uploadId}`, {
+                    const response = await fetch(endpoint, {
                         method: 'POST',
                         body: formData
                     });
@@ -254,71 +278,120 @@
             }
             
             streamProgress(uploadId, filename) {
-                // Use regular polling instead of SSE for simplicity
-                let attempts = 0;
-                const maxAttempts = 60; // 60 attempts = 30 seconds max
+                console.log(`🚀 Starting SSE stream for ${uploadId}`);
                 
-                const checkProgress = async () => {
+                // Use Server-Sent Events for real-time progress
+                const eventSource = new EventSource(`/upload/progress-stream/${uploadId}`);
+                let progressReceived = false;
+                
+                eventSource.onopen = (event) => {
+                    console.log(`✅ SSE connection opened for ${uploadId}`, event);
+                };
+                
+                eventSource.onmessage = (event) => {
                     try {
-                        console.log(`Checking progress for ${uploadId} (attempt ${attempts + 1})`);
-                        const response = await fetch(`/upload/progress/${uploadId}`);
-                        if (response.ok) {
-                            const progress = await response.json();
-                            console.log(`Progress update:`, progress);
+                        const progress = JSON.parse(event.data);
+                        console.log(`📡 SSE progress update:`, progress);
+                        progressReceived = true;
+                        
+                        // Update progress bar immediately
+                        this.showProgress(progress.message, progress.percent);
+                        
+                        if (progress.status === 'complete') {
+                            console.log(`✅ Upload completed via SSE:`, progress.result);
+                            const result = progress.result;
+                            this.addDocument({
+                                id: result.document_id,
+                                filename: result.filename || filename,
+                                uploadedAt: new Date(),
+                                chunks: result.chunks_created,
+                                enhanced: result.enhanced || false
+                            });
                             
-                            // Update progress bar
-                            this.showProgress(progress.message, progress.percent);
+                            setTimeout(() => {
+                                this.showSuccess();
+                                setTimeout(() => this.hideStatus(), 3000);
+                            }, 500);
                             
-                            if (progress.status === 'complete') {
-                                const result = progress.result;
-                                this.addDocument({
-                                    id: result.document_id,
-                                    filename: result.filename || filename,
-                                    uploadedAt: new Date(),
-                                    chunks: result.chunks_created
-                                });
-                                
-                                setTimeout(() => {
-                                    this.showSuccess();
-                                    setTimeout(() => this.hideStatus(), 3000);
-                                }, 500);
-                                return; // Stop polling
-                            } else if (progress.status === 'error') {
-                                this.showError(progress.message);
-                                return; // Stop polling
-                            }
-                            
-                            // Continue polling if still processing
-                            if (progress.status === 'processing') {
-                                setTimeout(checkProgress, 300);
-                            }
-                        } else if (response.status === 404) {
-                            // Upload not found yet, retry with backoff
-                            attempts++;
-                            if (attempts < maxAttempts) {
-                                console.log(`Upload ${uploadId} not found yet, retrying... (${attempts}/${maxAttempts})`);
-                                setTimeout(checkProgress, attempts < 5 ? 500 : 1000); // Faster initial retries
-                            } else {
-                                this.showError('Upload tracking failed - please try again');
-                            }
-                        } else {
-                            // Other HTTP errors
-                            const errorData = await response.json().catch(() => ({}));
-                            this.showError(errorData.detail || 'Upload progress check failed');
+                            eventSource.close();
+                            return;
+                        } else if (progress.status === 'error') {
+                            console.log(`❌ Upload failed via SSE:`, progress.error);
+                            this.showError(progress.error || progress.message || 'Upload failed');
+                            eventSource.close();
+                            return;
                         }
                     } catch (error) {
-                        attempts++;
-                        console.error('Error checking progress:', error);
-                        if (attempts < maxAttempts) {
-                            setTimeout(checkProgress, 1000); // Retry after 1 second
-                        } else {
-                            this.showError('Connection error - please try again');
-                        }
+                        console.error('❌ Error parsing SSE data:', error, 'Raw data:', event.data);
                     }
                 };
                 
-                // Start polling with a delay to allow upload endpoint to initialize
-                setTimeout(checkProgress, 1000); // Increased delay
+                eventSource.onerror = (error) => {
+                    console.error('❌ SSE connection error:', error);
+                    console.error('SSE readyState:', eventSource.readyState);
+                    
+                    if (!progressReceived) {
+                        console.log('⚠️ SSE failed before receiving any progress, trying manual check...');
+                        eventSource.close();
+                        // Try one manual check to see if upload completed quickly
+                        this.checkProgressOnce(uploadId, filename);
+                    } else {
+                        console.log('⚠️ SSE failed after receiving some progress');
+                        eventSource.close();
+                    }
+                };
+                
+                // Timeout for SSE connection
+                setTimeout(() => {
+                    if (!progressReceived && eventSource.readyState !== EventSource.CLOSED) {
+                        console.log('⏰ SSE timeout - no progress received, trying manual check...');
+                        eventSource.close();
+                        this.checkProgressOnce(uploadId, filename);
+                    }
+                }, 5000);
+            }
+            
+            // Single progress check (not continuous polling)
+            async checkProgressOnce(uploadId, filename) {
+                try {
+                    console.log(`🔍 Manual progress check for ${uploadId}`);
+                    const response = await fetch(`/upload/progress/${uploadId}`);
+                    
+                    if (response.ok) {
+                        const progress = await response.json();
+                        console.log(`📊 Manual progress result:`, progress);
+                        
+                        this.showProgress(progress.message, progress.percent);
+                        
+                        if (progress.status === 'complete') {
+                            const result = progress.result;
+                            this.addDocument({
+                                id: result.document_id,
+                                filename: result.filename || filename,
+                                uploadedAt: new Date(),
+                                chunks: result.chunks_created,
+                                enhanced: result.enhanced || false
+                            });
+                            
+                            setTimeout(() => {
+                                this.showSuccess();
+                                setTimeout(() => this.hideStatus(), 3000);
+                            }, 500);
+                        } else if (progress.status === 'error') {
+                            this.showError(progress.error || progress.message || 'Upload failed');
+                        } else {
+                            // Still processing, try SSE again
+                            console.log(`🔄 Upload still processing, retrying SSE...`);
+                            setTimeout(() => this.streamProgress(uploadId, filename), 1000);
+                        }
+                    } else {
+                        console.error(`❌ Manual check failed: ${response.status}`);
+                        this.showError('Upload status check failed');
+                    }
+                } catch (error) {
+                    console.error('❌ Manual check error:', error);
+                    this.showError('Failed to check upload status');
+                }
             }
 
             addDocument(doc) {
@@ -369,15 +442,18 @@
                     const chunkInfo = doc.chunks ? `${doc.chunks} chunks` : '';
                     const sizeInfo = doc.fileSize ? `${Math.round(doc.fileSize / 1024)}KB` : '';
                     const metaInfo = [uploadDate, chunkInfo, sizeInfo].filter(Boolean).join(' • ');
+                    const isEnhanced = doc.enhanced || false;
                     
                     return `
                     <div class="document-item p-3 border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors">
                         <div class="flex items-start space-x-3">
-                            <div class="text-lg flex-shrink-0">📄</div>
+                            <div class="text-lg flex-shrink-0">${isEnhanced ? '🧠' : '📄'}</div>
                             <div class="flex-1 min-w-0">
                                 <p class="text-sm font-medium text-gray-800 truncate" title="${doc.filename}">${doc.filename}</p>
                                 <p class="text-xs text-gray-500 mt-1">${metaInfo}</p>
-                                <p class="text-xs text-green-600 mt-1">✓ Available for search</p>
+                                <p class="text-xs ${isEnhanced ? 'text-purple-600' : 'text-green-600'} mt-1">
+                                    ${isEnhanced ? '🧠 Enhanced with AI metadata' : '✓ Available for search'}
+                                </p>
                             </div>
                         </div>
                     </div>
@@ -493,7 +569,7 @@
             clearChatMessages() {
                 this.chatMessages.innerHTML = `
                     <div id="welcome-message" class="text-gray-500 text-center py-8">
-                        Ask questions about your documents - I'll search across all of them to find the best answers!
+                        Ask questions about your documents - I'll search across them to find the best answers!
                     </div>
                 `;
                 this.welcomeMessage = document.getElementById('welcome-message');

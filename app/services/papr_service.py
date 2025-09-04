@@ -2,7 +2,7 @@ import os
 import logging
 from typing import List, Dict, Any, Optional
 from papr_memory import Papr
-from papr_memory.types import MemoryMetadataParam, MemoryType, AddMemoryResponse, SearchResponse, UserResponse
+from papr_memory.types import MemoryMetadata, MemoryType, AddMemoryResponse, SearchResponse, UserResponse
 from .document_store import DocumentStore
 
 logger = logging.getLogger(__name__)
@@ -472,4 +472,80 @@ class PaprMemoryService:
             return True
         except Exception as e:
             logger.error(f"Error deleting document: {str(e)}")
+            raise
+
+    def add_memory_with_metadata(
+        self,
+        content: str,
+        external_user_id: str,
+        metadata: Dict[str, Any]
+    ) -> str:
+        """
+        Add a single memory item with comprehensive metadata
+        """
+        try:
+            # Debug: Log the metadata being processed
+            logger.info(f"Processing enhanced metadata: {metadata}")
+            
+            # Convert heading_hierarchy to hierarchical_structures (root level field)
+            hierarchical_structures = None
+            if "heading_hierarchy" in metadata and metadata["heading_hierarchy"]:
+                # Join hierarchy with " > " separator
+                hierarchical_structures = " > ".join(metadata["heading_hierarchy"])
+            
+            # Extract topics from topic_tags array
+            topics = metadata.get("topic_tags", ["document"])
+            
+            # Create custom_metadata by excluding standard fields that go in root
+            standard_fields = {
+                "topic_tags", "external_user_id", "created_at", 
+                "document_id", "chunk_index", "total_chunks", "enhanced",
+                "heading_hierarchy",  # This goes to hierarchical_structures instead
+                "source_url"  # This goes to root level
+            }
+            custom_metadata = {
+                key: value for key, value in metadata.items() 
+                if key not in standard_fields
+            }
+            
+            # Create the memory metadata structure
+            memory_metadata = MemoryMetadata(
+                external_user_id=external_user_id,
+                topics=topics,
+                customMetadata=custom_metadata,  # Use correct alias
+                createdAt=metadata.get("created_at"),  # Use correct alias
+                hierarchical_structures=hierarchical_structures,
+                sourceUrl=metadata.get("source_url")  # Use correct alias
+            )
+            
+            logger.info(f"Created MemoryMetadata:")
+            logger.info(f"  - external_user_id: {external_user_id}")
+            logger.info(f"  - topics: {topics}")
+            logger.info(f"  - hierarchical_structures: {hierarchical_structures}")
+            logger.info(f"  - source_url: {metadata.get('source_url')}")
+            logger.info(f"  - custom_metadata keys: {list(custom_metadata.keys())}")
+            logger.info(f"  - custom_metadata values: {custom_metadata}")
+            logger.info(f"  - created_at: {metadata.get('created_at')}")
+            
+            # Verify the MemoryMetadata object was created correctly
+            logger.info(f"MemoryMetadata verification:")
+            logger.info(f"  - memory_metadata.custom_metadata: {memory_metadata.custom_metadata}")
+            logger.info(f"  - memory_metadata.topics: {memory_metadata.topics}")
+            logger.info(f"  - memory_metadata.hierarchical_structures: {memory_metadata.hierarchical_structures}")
+            
+            # Add to Papr Memory
+            response = self.client.memory.add(
+                content=content,
+                metadata=memory_metadata,
+                type="text"
+            )
+            
+            memory_id = response.data[0].memory_id
+            logger.info(f"Added enhanced memory with ID: {memory_id}")
+            return memory_id
+            
+        except Exception as e:
+            logger.error(f"Error adding enhanced memory: {e}", exc_info=True)
+            logger.error(f"Failed metadata structure: {memory_metadata}")
+            logger.error(f"Failed custom_metadata: {custom_metadata}")
             raise
